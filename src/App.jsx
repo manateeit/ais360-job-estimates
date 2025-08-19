@@ -15,7 +15,7 @@ import {
   ArrowLeft,
   Save
 } from 'lucide-react'
-import { jobsAPI, signsAPI, standardRatesAPI } from './lib/supabase.js'
+import { jobsAPI, signsAPI, standardRatesAPI, supabase } from './lib/supabase.js'
 import './App.css'
 
 function App() {
@@ -145,7 +145,8 @@ function App() {
       setCurrentJob({
         ...currentJob,
         id: newJob.id,
-        ...jobData
+        ...jobData,
+        signs: [] // Initialize empty signs array
       })
       await loadJobs() // Refresh jobs list
       return newJob
@@ -155,6 +156,19 @@ function App() {
       throw err
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadSignsForJob = async (jobId) => {
+    try {
+      const signs = await signsAPI.getSignsByJobId(jobId)
+      setCurrentJob(prev => ({
+        ...prev,
+        signs: signs || []
+      }))
+    } catch (err) {
+      console.error('Error loading signs:', err)
+      setError('Failed to load signs: ' + err.message)
     }
   }
 
@@ -193,6 +207,90 @@ function App() {
       console.error('Error deleting job:', err)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const saveDepartmentData = async (signId) => {
+    try {
+      // Save Art Department data
+      for (const [task, data] of Object.entries(currentSign.artDept)) {
+        if (data.hours > 0) {
+          await supabase.from('jobestimate_art_department').insert({
+            sign_id: signId,
+            task_name: task,
+            task_type: task,
+            hours: data.hours,
+            rate: data.rate
+          })
+        }
+      }
+
+      // Save Fabrication Department data
+      for (const [task, data] of Object.entries(currentSign.fabrication)) {
+        if (data.hours > 0) {
+          await supabase.from('jobestimate_fabrication_department').insert({
+            sign_id: signId,
+            task_name: task,
+            task_type: task,
+            hours: data.hours,
+            rate: data.rate
+          })
+        }
+      }
+
+      // Save Installation Department data
+      for (const [task, data] of Object.entries(currentSign.installation)) {
+        if (data.hours > 0) {
+          await supabase.from('jobestimate_installation_department').insert({
+            sign_id: signId,
+            task_name: task,
+            task_type: task,
+            hours: data.hours,
+            rate: data.rate
+          })
+        }
+      }
+
+      // Save SubContractors data
+      for (const item of currentSign.subcontractors) {
+        if (item.name && item.cost > 0) {
+          await supabase.from('jobestimate_subcontractors').insert({
+            sign_id: signId,
+            description: item.name,
+            cost: item.cost
+          })
+        }
+      }
+
+      // Save Materials data
+      for (const item of currentSign.materials) {
+        if (item.name && item.cost > 0) {
+          await supabase.from('jobestimate_materials').insert({
+            sign_id: signId,
+            material_name: item.name,
+            material_type: item.type || '',
+            quantity: item.qty || 1,
+            unit_cost: item.cost,
+            markup_percentage: 0 // Default markup
+          })
+        }
+      }
+
+      // Save Crating & Other Fees data
+      for (const [item, data] of Object.entries(currentSign.crating)) {
+        if (data.qty > 0 && data.cost > 0) {
+          await supabase.from('jobestimate_crating_fees').insert({
+            sign_id: signId,
+            item_name: item,
+            quantity: data.qty,
+            unit_cost: data.cost,
+            total: data.qty * data.cost
+          })
+        }
+      }
+    } catch (error) {
+      console.error('Error saving department data:', error)
+      throw error
     }
   }
 
@@ -448,7 +546,7 @@ function App() {
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  onClick={() => {
+                                  onClick={async () => {
                                     setCurrentJob({
                                       id: job.id,
                                       jobNumber: job.job_number,
@@ -462,6 +560,7 @@ function App() {
                                       estimateDate: job.estimate_date,
                                       signs: []
                                     })
+                                    await loadSignsForJob(job.id)
                                     setActiveMenuItem('job-creation')
                                     setJobCreationStep('job-estimate-summary')
                                   }}
@@ -742,12 +841,25 @@ function App() {
                                     <Button
                                       variant="outline"
                                       size="sm"
-                                      onClick={() => {
-                                        const newSigns = [...currentJob.signs]
-                                        newSigns.splice(index, 1)
-                                        setCurrentJob({...currentJob, signs: newSigns})
+                                      onClick={async () => {
+                                        try {
+                                          setLoading(true)
+                                          const signToDelete = currentJob.signs[index]
+                                          if (signToDelete.id) {
+                                            await signsAPI.deleteSign(signToDelete.id)
+                                          }
+                                          const newSigns = [...currentJob.signs]
+                                          newSigns.splice(index, 1)
+                                          setCurrentJob({...currentJob, signs: newSigns})
+                                        } catch (error) {
+                                          console.error('Error deleting sign:', error)
+                                          setError('Failed to delete sign. Please try again.')
+                                        } finally {
+                                          setLoading(false)
+                                        }
                                       }}
                                       className="text-red-600 hover:text-red-800"
+                                      disabled={loading}
                                     >
                                       Delete
                                     </Button>
@@ -1365,23 +1477,54 @@ function App() {
                             Cancel
                           </Button>
                           <Button
-                            onClick={() => {
-                              if (editingSignIndex !== null) {
-                                // Edit existing sign
-                                const newSigns = [...currentJob.signs]
-                                newSigns[editingSignIndex] = {...currentSign}
-                                setCurrentJob({...currentJob, signs: newSigns})
-                              } else {
-                                // Add new sign
-                                const newSigns = [...currentJob.signs, {...currentSign}]
-                                setCurrentJob({...currentJob, signs: newSigns})
+                            onClick={async () => {
+                              setLoading(true)
+                              try {
+                                if (editingSignIndex !== null) {
+                                  // Edit existing sign - update in database
+                                  const signToUpdate = currentJob.signs[editingSignIndex]
+                                  await signsAPI.updateSign(signToUpdate.id, {
+                                    sign_type: currentSign.signType,
+                                    quantity: currentSign.quantity,
+                                    description: currentSign.description
+                                  })
+                                  
+                                  // Update local state
+                                  const newSigns = [...currentJob.signs]
+                                  newSigns[editingSignIndex] = {...currentSign}
+                                  setCurrentJob({...currentJob, signs: newSigns})
+                                } else {
+                                  // Add new sign - save to database
+                                  const signData = {
+                                    jobId: currentJob.id,
+                                    signType: currentSign.signType,
+                                    quantity: currentSign.quantity,
+                                    description: currentSign.description
+                                  }
+                                  
+                                  const newSign = await signsAPI.createSign(signData)
+                                  
+                                  // Save department data to database
+                                  await saveDepartmentData(newSign.id)
+                                  
+                                  // Update local state
+                                  const newSigns = [...currentJob.signs, {...currentSign, id: newSign.id}]
+                                  setCurrentJob({...currentJob, signs: newSigns})
+                                }
+                                
+                                setJobCreationStep('job-estimate-summary')
+                                setEditingSignIndex(null)
+                              } catch (error) {
+                                console.error('Error saving sign:', error)
+                                setError('Failed to save sign. Please try again.')
+                              } finally {
+                                setLoading(false)
                               }
-                              setJobCreationStep('job-estimate-summary')
-                              setEditingSignIndex(null)
                             }}
                             className="bg-blue-600 hover:bg-blue-700"
+                            disabled={loading}
                           >
-                            {editingSignIndex !== null ? 'Update Sign' : 'Add Sign'}
+                            {loading ? 'Saving...' : (editingSignIndex !== null ? 'Update Sign' : 'Add Sign')}
                           </Button>
                         </div>
                       </div>
