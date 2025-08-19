@@ -2,26 +2,33 @@ import { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button.jsx'
 import { 
   Menu, 
-  X, 
-  LayoutDashboard, 
-  FileText, 
-  MessageSquare, 
-  Settings, 
-  User, 
-  LogOut,
+  X
+} from 'lucide-react'
+import {
+  LayoutDashboard,
+  FileText,
+  MessageSquare,
+  Settings,
   ChevronDown,
   ChevronRight,
+  User,
+  LogOut,
   Plus,
   ArrowLeft,
-  Save
+  Save,
+  RefreshCw,
+  Eye,
+  ArrowRight
 } from 'lucide-react'
 import { jobsAPI, signsAPI, standardRatesAPI, supabase } from './lib/supabase.js'
+import { netsuiteClient } from './lib/netsuiteClient.js'
 import './App.css'
 
 function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [adminMenuOpen, setAdminMenuOpen] = useState(false)
+  const [jobEstimatesMenuOpen, setJobEstimatesMenuOpen] = useState(false)
   const [activeMenuItem, setActiveMenuItem] = useState('dashboard')
   
   // Database states
@@ -29,6 +36,12 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [standardRates, setStandardRates] = useState({})
+  
+  // NetSuite states
+  const [estimateRequests, setEstimateRequests] = useState([])
+  const [netsuiteLoading, setNetsuiteLoading] = useState(false)
+  const [netsuiteError, setNetsuiteError] = useState(null)
+  const [selectedRequest, setSelectedRequest] = useState(null)
   
   // Job creation states
   const [jobCreationStep, setJobCreationStep] = useState(null) // null, 'job-info', 'job-estimate-summary', 'sign-entry'
@@ -93,7 +106,9 @@ function App() {
     subcontractors: [
       { name: '', cost: 0 }
     ],
-    materials: [],
+    materials: [
+      { name: '', type: '', qty: 0, cost: 0 }
+    ],
     crating: {
       cratingLabor: { qty: 0, cost: 81.81 },
       packingMaterials: { qty: 1, cost: 0 },
@@ -135,6 +150,65 @@ function App() {
       setStandardRates(ratesMap)
     } catch (err) {
       console.error('Error loading standard rates:', err)
+    }
+  }
+
+  // NetSuite functions
+  const loadEstimateRequests = async () => {
+    try {
+      setNetsuiteLoading(true)
+      setNetsuiteError(null)
+      const response = await netsuiteClient.fetchPendingEstimateRequests()
+      setEstimateRequests(response.items)
+    } catch (err) {
+      setNetsuiteError('Failed to load estimate requests: ' + err.message)
+      console.error('Error loading estimate requests:', err)
+    } finally {
+      setNetsuiteLoading(false)
+    }
+  }
+
+  const convertRequestToJobEstimate = async (requestId) => {
+    try {
+      setNetsuiteLoading(true)
+      const result = await netsuiteClient.convertRequestToJobEstimate(requestId)
+      
+      if (result.success) {
+        // Find the request to convert
+        const request = estimateRequests.find(req => req.id === requestId)
+        if (request) {
+          // Create a new job estimate with the request data
+          const jobData = {
+            jobNumber: result.jobEstimateId,
+            jobName: request.job_name,
+            jobAddress: '', // Not available in estimate request
+            contactName: request.requested_by_name,
+            contactEmail: '', // Not available in estimate request
+            contactPhone: '', // Not available in estimate request
+            estimateCompletedBy: request.assigned_to_name,
+            projectManager: request.assigned_to_name,
+            estimateDate: new Date().toISOString().split('T')[0]
+          }
+          
+          // Create the job estimate
+          await createJob(jobData)
+          
+          // Refresh estimate requests to remove the converted one
+          await loadEstimateRequests()
+          
+          // Switch to job estimates view
+          setActiveMenuItem('job-estimates')
+          
+          return { success: true, message: 'Successfully converted to job estimate!' }
+        }
+      }
+      
+      return result
+    } catch (err) {
+      console.error('Error converting request:', err)
+      return { success: false, error: err.message }
+    } finally {
+      setNetsuiteLoading(false)
     }
   }
 
@@ -296,7 +370,16 @@ function App() {
 
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'job-estimates', label: 'Job Estimates', icon: FileText },
+    { 
+      id: 'job-estimates-parent', 
+      label: 'Job Estimates', 
+      icon: FileText, 
+      isParent: true,
+      submenu: [
+        { id: 'job-estimate-request', label: 'Job Estimate Request', icon: Plus },
+        { id: 'job-estimates', label: 'Job Estimates', icon: FileText }
+      ]
+    },
     { id: 'netsuite-chat', label: 'Netsuite Chat', icon: MessageSquare },
   ]
 
@@ -325,6 +408,53 @@ function App() {
           <div className="space-y-1">
             {menuItems.map((item) => {
               const Icon = item.icon
+              
+              if (item.isParent) {
+                return (
+                  <div key={item.id}>
+                    <button
+                      onClick={() => setJobEstimatesMenuOpen(!jobEstimatesMenuOpen)}
+                      className="w-full text-left px-3 py-2 rounded-lg flex items-center justify-between text-slate-600 hover:bg-slate-50 transition-colors"
+                    >
+                      <div className="flex items-center space-x-3">
+                        <Icon className="h-5 w-5" />
+                        <span>{item.label}</span>
+                      </div>
+                      {jobEstimatesMenuOpen ? (
+                        <ChevronDown className="h-4 w-4" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4" />
+                      )}
+                    </button>
+                    
+                    {jobEstimatesMenuOpen && (
+                      <div className="ml-6 mt-1 space-y-1">
+                        {item.submenu.map((subItem) => {
+                          const SubIcon = subItem.icon
+                          return (
+                            <button
+                              key={subItem.id}
+                              onClick={() => {
+                                setActiveMenuItem(subItem.id)
+                                setSidebarOpen(false)
+                              }}
+                              className={`w-full text-left px-3 py-2 rounded-lg flex items-center space-x-3 transition-colors text-sm ${
+                                activeMenuItem === subItem.id
+                                  ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                                  : 'text-slate-500 hover:bg-slate-50'
+                              }`}
+                            >
+                              <SubIcon className="h-4 w-4" />
+                              <span>{subItem.label}</span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )
+              }
+              
               return (
                 <button
                   key={item.id}
@@ -462,6 +592,238 @@ function App() {
                     <p className="text-sm text-slate-500 mt-1">This month</p>
                   </div>
                 </div>
+              </div>
+            )}
+
+            {/* Job Estimate Request */}
+            {activeMenuItem === 'job-estimate-request' && (
+              <div>
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-2xl font-bold text-slate-900">Job Estimate Requests</h2>
+                  <Button
+                    onClick={loadEstimateRequests}
+                    disabled={netsuiteLoading}
+                    className="bg-blue-600 hover:bg-blue-700 text-white"
+                  >
+                    {netsuiteLoading ? (
+                      <>
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                        Loading...
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="h-4 w-4 mr-2" />
+                        Refresh
+                      </>
+                    )}
+                  </Button>
+                </div>
+
+                {/* Error Display */}
+                {netsuiteError && (
+                  <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+                    <p className="text-red-800">{netsuiteError}</p>
+                    <button 
+                      onClick={() => setNetsuiteError(null)}
+                      className="text-red-600 hover:text-red-800 text-sm underline mt-1"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                )}
+
+                {/* Estimate Requests Table */}
+                <div className="bg-white rounded-lg shadow-sm border border-slate-200">
+                  <div className="p-6">
+                    {netsuiteLoading ? (
+                      <div className="flex items-center justify-center py-12">
+                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                        <span className="ml-3 text-slate-600">Loading estimate requests...</span>
+                      </div>
+                    ) : estimateRequests.length === 0 ? (
+                      <div className="text-center py-12">
+                        <div className="text-slate-400 mb-4">
+                          <FileText className="h-12 w-12 mx-auto" />
+                        </div>
+                        <h3 className="text-lg font-medium text-slate-900 mb-2">No Pending Requests</h3>
+                        <p className="text-slate-500">All estimate requests have been completed or there are no new requests.</p>
+                        <Button
+                          onClick={loadEstimateRequests}
+                          className="mt-4 bg-blue-600 hover:bg-blue-700 text-white"
+                        >
+                          <RefreshCw className="h-4 w-4 mr-2" />
+                          Check for New Requests
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full divide-y divide-slate-200">
+                          <thead className="bg-slate-50">
+                            <tr>
+                              <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                Request ID
+                              </th>
+                              <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                Job Name
+                              </th>
+                              <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                Priority
+                              </th>
+                              <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                Status
+                              </th>
+                              <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                Assigned To
+                              </th>
+                              <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                Due Date
+                              </th>
+                              <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                Actions
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody className="bg-white divide-y divide-slate-200">
+                            {estimateRequests.map((request) => (
+                              <tr key={request.id} className="hover:bg-slate-50">
+                                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-900">
+                                  {request.id}
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-900">
+                                  {request.job_name}
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap">
+                                  <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${netsuiteClient.getPriorityColor(request.priority_name)}`}>
+                                    {request.priority_name}
+                                  </span>
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap">
+                                  <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${netsuiteClient.getStatusColor(request.status_name)}`}>
+                                    {request.status_name}
+                                  </span>
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-900">
+                                  {request.assigned_to_name}
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-900">
+                                  {netsuiteClient.formatDate(request.bid_due_date)}
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                                  <Button
+                                    onClick={() => setSelectedRequest(request)}
+                                    className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-3 py-1"
+                                  >
+                                    <Eye className="h-3 w-3 mr-1" />
+                                    View
+                                  </Button>
+                                  <Button
+                                    onClick={() => convertRequestToJobEstimate(request.id)}
+                                    disabled={netsuiteLoading}
+                                    className="bg-green-600 hover:bg-green-700 text-white text-xs px-3 py-1"
+                                  >
+                                    <ArrowRight className="h-3 w-3 mr-1" />
+                                    Convert
+                                  </Button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Request Detail Modal */}
+                {selectedRequest && (
+                  <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+                    <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+                      <div className="p-6">
+                        <div className="flex items-center justify-between mb-4">
+                          <h3 className="text-lg font-semibold text-slate-900">
+                            Request Details - {selectedRequest.id}
+                          </h3>
+                          <button
+                            onClick={() => setSelectedRequest(null)}
+                            className="text-slate-400 hover:text-slate-600"
+                          >
+                            <X className="h-5 w-5" />
+                          </button>
+                        </div>
+                        
+                        <div className="space-y-4">
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <label className="text-sm font-medium text-slate-700">Job Name</label>
+                              <p className="text-slate-900">{selectedRequest.job_name}</p>
+                            </div>
+                            <div>
+                              <label className="text-sm font-medium text-slate-700">Priority</label>
+                              <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${netsuiteClient.getPriorityColor(selectedRequest.priority_name)}`}>
+                                {selectedRequest.priority_name}
+                              </span>
+                            </div>
+                            <div>
+                              <label className="text-sm font-medium text-slate-700">Status</label>
+                              <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${netsuiteClient.getStatusColor(selectedRequest.status_name)}`}>
+                                {selectedRequest.status_name}
+                              </span>
+                            </div>
+                            <div>
+                              <label className="text-sm font-medium text-slate-700">Assigned To</label>
+                              <p className="text-slate-900">{selectedRequest.assigned_to_name}</p>
+                            </div>
+                            <div>
+                              <label className="text-sm font-medium text-slate-700">Requested By</label>
+                              <p className="text-slate-900">{selectedRequest.requested_by_name}</p>
+                            </div>
+                            <div>
+                              <label className="text-sm font-medium text-slate-700">Due Date</label>
+                              <p className="text-slate-900">{netsuiteClient.formatDate(selectedRequest.bid_due_date)}</p>
+                            </div>
+                            <div>
+                              <label className="text-sm font-medium text-slate-700">Date Submitted</label>
+                              <p className="text-slate-900">{netsuiteClient.formatDate(selectedRequest.date_submitted)}</p>
+                            </div>
+                            <div>
+                              <label className="text-sm font-medium text-slate-700">Estimate Due</label>
+                              <p className="text-slate-900">{netsuiteClient.formatDate(selectedRequest.estimate_due_date)}</p>
+                            </div>
+                          </div>
+                          
+                          {selectedRequest.estimator_note && (
+                            <div>
+                              <label className="text-sm font-medium text-slate-700">Estimator Notes</label>
+                              <p className="text-slate-900 bg-slate-50 p-3 rounded-lg mt-1">
+                                {selectedRequest.estimator_note}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                        
+                        <div className="flex justify-end space-x-3 mt-6 pt-4 border-t border-slate-200">
+                          <Button
+                            onClick={() => setSelectedRequest(null)}
+                            className="bg-slate-100 hover:bg-slate-200 text-slate-700"
+                          >
+                            Close
+                          </Button>
+                          <Button
+                            onClick={() => {
+                              convertRequestToJobEstimate(selectedRequest.id)
+                              setSelectedRequest(null)
+                            }}
+                            disabled={netsuiteLoading}
+                            className="bg-green-600 hover:bg-green-700 text-white"
+                          >
+                            <ArrowRight className="h-4 w-4 mr-2" />
+                            Convert to Job Estimate
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1151,52 +1513,12 @@ function App() {
                                     </td>
                                   </tr>
                                 ))}
-                                <tr className="bg-yellow-100">
-                                  <td className="border border-slate-300 px-4 py-2 font-bold">Sub & Equipment</td>
-                                  <td className="border border-slate-300 px-4 py-2"></td>
-                                  <td className="border border-slate-300 px-4 py-2"></td>
-                                  <td className="border border-slate-300 px-4 py-2 text-center font-bold">$0.00</td>
-                                </tr>
-                                {currentSign.subs.map((sub, index) => (
-                                  <tr key={index} className="hover:bg-slate-50">
-                                    <td className="border border-slate-300 px-4 py-2 bg-yellow-100">
-                                      <input
-                                        type="text"
-                                        value={sub.name}
-                                        onChange={(e) => {
-                                          const newSubs = [...currentSign.subs]
-                                          newSubs[index] = { ...sub, name: e.target.value }
-                                          setCurrentSign({ ...currentSign, subs: newSubs })
-                                        }}
-                                        className="w-full px-2 py-1 border-0 bg-transparent focus:outline-none focus:bg-white focus:border focus:border-blue-500 rounded"
-                                      />
-                                    </td>
-                                    <td className="border border-slate-300 px-4 py-2"></td>
-                                    <td className="border border-slate-300 px-2 py-2">
-                                      <input
-                                        type="number"
-                                        step="0.01"
-                                        value={sub.cost}
-                                        onChange={(e) => {
-                                          const newSubs = [...currentSign.subs]
-                                          newSubs[index] = { ...sub, cost: parseFloat(e.target.value) || 0 }
-                                          setCurrentSign({ ...currentSign, subs: newSubs })
-                                        }}
-                                        className="w-full px-2 py-1 border-0 bg-transparent text-center focus:outline-none focus:bg-white focus:border focus:border-blue-500 rounded"
-                                      />
-                                    </td>
-                                    <td className="border border-slate-300 px-4 py-2 text-center font-medium">
-                                      ${sub.cost.toFixed(2)}
-                                    </td>
-                                  </tr>
-                                ))}
                                 <tr className="bg-slate-100 font-bold">
                                   <td className="border border-slate-300 px-4 py-2">Installation Department Totals</td>
                                   <td className="border border-slate-300 px-4 py-2 text-center">-</td>
                                   <td className="border border-slate-300 px-4 py-2"></td>
                                   <td className="border border-slate-300 px-4 py-2 text-center">
-                                    ${(Object.values(currentSign.installation).reduce((sum, item) => sum + (item.hours * item.rate), 0) + 
-                                       currentSign.subs.reduce((sum, sub) => sum + sub.cost, 0)).toFixed(2)}
+                                    ${Object.values(currentSign.installation).reduce((sum, item) => sum + (item.hours * item.rate), 0).toFixed(2)}
                                   </td>
                                 </tr>
                               </tbody>
@@ -1293,6 +1615,7 @@ function App() {
                                   <th className="border border-slate-300 px-4 py-2 text-center font-medium">Qty.</th>
                                   <th className="border border-slate-300 px-4 py-2 text-center font-medium">Cost</th>
                                   <th className="border border-slate-300 px-4 py-2 text-center font-medium">Total</th>
+                                  <th className="border border-slate-300 px-4 py-2 text-center font-medium">Action</th>
                                 </tr>
                               </thead>
                               <tbody>
@@ -1352,39 +1675,46 @@ function App() {
                                     <td className="border border-slate-300 px-4 py-2 text-center font-medium">
                                       ${((material.qty || 0) * (material.cost || 0)).toFixed(2)}
                                     </td>
-                                  </tr>
-                                ))}
-                                {/* Add empty rows for new materials */}
-                                {Array.from({ length: Math.max(5, 10 - currentSign.materials.length) }).map((_, index) => (
-                                  <tr key={`empty-${index}`} className="hover:bg-slate-50">
-                                    <td className="border border-slate-300 px-2 py-2 bg-yellow-100">
-                                      <input
-                                        type="text"
-                                        onChange={(e) => {
-                                          if (e.target.value) {
-                                            const newMaterials = [...currentSign.materials]
-                                            newMaterials.push({ name: e.target.value, type: '', qty: 0, cost: 0 })
-                                            setCurrentSign({ ...currentSign, materials: newMaterials })
-                                          }
+                                    <td className="border border-slate-300 px-2 py-2 text-center">
+                                      <button
+                                        onClick={() => {
+                                          const newMaterials = currentSign.materials.filter((_, i) => i !== index)
+                                          setCurrentSign({ ...currentSign, materials: newMaterials })
                                         }}
-                                        className="w-full px-2 py-1 border-0 bg-transparent focus:outline-none focus:bg-white focus:border focus:border-blue-500 rounded"
-                                        placeholder="Material name"
-                                      />
+                                        className="px-2 py-1 bg-red-500 text-white text-xs rounded hover:bg-red-600"
+                                      >
+                                        Remove
+                                      </button>
                                     </td>
-                                    <td className="border border-slate-300 px-2 py-2 bg-yellow-100"></td>
-                                    <td className="border border-slate-300 px-2 py-2"></td>
-                                    <td className="border border-slate-300 px-2 py-2"></td>
-                                    <td className="border border-slate-300 px-4 py-2 text-center">$-</td>
                                   </tr>
                                 ))}
+                                <tr>
+                                  <td colSpan="6" className="border border-slate-300 px-4 py-2 text-center">
+                                    <button
+                                      onClick={() => {
+                                        const newMaterials = [...currentSign.materials, { name: '', type: '', qty: 0, cost: 0 }]
+                                        setCurrentSign({ ...currentSign, materials: newMaterials })
+                                      }}
+                                      className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                                    >
+                                      <Plus className="w-4 h-4 inline mr-1" />
+                                      Add Row
+                                    </button>
+                                  </td>
+                                </tr>
                                 <tr className="bg-slate-100">
-                                  <td className="border border-slate-300 px-4 py-2 font-bold" colSpan="3">Material Cost</td>
-                                  <td className="border border-slate-300 px-4 py-2 text-center font-bold">$-</td>
+                                  <td className="border border-slate-300 px-4 py-2 font-bold" colSpan="4">Material Cost</td>
+                                  <td className="border border-slate-300 px-4 py-2 text-center font-bold">
+                                    ${currentSign.materials.reduce((sum, material) => sum + ((material.qty || 0) * (material.cost || 0)), 0).toFixed(2)}
+                                  </td>
                                   <td className="border border-slate-300 px-4 py-2 text-center font-bold">Buyout</td>
                                 </tr>
                                 <tr className="bg-slate-100">
                                   <td className="border border-slate-300 px-4 py-2 font-bold" colSpan="4">Material Cost Marked Up</td>
-                                  <td className="border border-slate-300 px-4 py-2 text-center font-bold">$-</td>
+                                  <td className="border border-slate-300 px-4 py-2 text-center font-bold">
+                                    ${(currentSign.materials.reduce((sum, material) => sum + ((material.qty || 0) * (material.cost || 0)), 0) * 1.2).toFixed(2)}
+                                  </td>
+                                  <td className="border border-slate-300 px-4 py-2"></td>
                                 </tr>
                               </tbody>
                             </table>
