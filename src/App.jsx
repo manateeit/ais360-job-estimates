@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button.jsx'
 import { 
   Menu, 
@@ -15,6 +15,7 @@ import {
   ArrowLeft,
   Save
 } from 'lucide-react'
+import { jobsAPI, signsAPI, standardRatesAPI } from './lib/supabase.js'
 import './App.css'
 
 function App() {
@@ -23,17 +24,26 @@ function App() {
   const [adminMenuOpen, setAdminMenuOpen] = useState(false)
   const [activeMenuItem, setActiveMenuItem] = useState('dashboard')
   
+  // Database states
+  const [jobs, setJobs] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+  const [standardRates, setStandardRates] = useState({})
+  
   // Job creation states
   const [jobCreationStep, setJobCreationStep] = useState(null) // null, 'job-info', 'job-estimate-summary', 'sign-entry'
   const [editingSignIndex, setEditingSignIndex] = useState(null)
   const [currentJob, setCurrentJob] = useState({
+    id: null,
     jobNumber: '',
     jobName: '',
     jobAddress: '',
-    contact: '',
+    contactName: '',
+    contactEmail: '',
+    contactPhone: '',
     estimateCompletedBy: '',
     projectManager: '',
-    date: '',
+    estimateDate: '',
     signs: []
   })
   
@@ -91,6 +101,100 @@ function App() {
       hotel: { qty: 0, cost: 225.00 }
     }
   })
+
+  // Load data on component mount
+  useEffect(() => {
+    loadJobs()
+    loadStandardRates()
+  }, [])
+
+  // Database functions
+  const loadJobs = async () => {
+    try {
+      setLoading(true)
+      const jobsData = await jobsAPI.getAllJobs()
+      setJobs(jobsData)
+    } catch (err) {
+      setError('Failed to load jobs: ' + err.message)
+      console.error('Error loading jobs:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const loadStandardRates = async () => {
+    try {
+      const rates = await standardRatesAPI.getStandardRates()
+      const ratesMap = {}
+      rates.forEach(rate => {
+        if (!ratesMap[rate.department]) {
+          ratesMap[rate.department] = {}
+        }
+        ratesMap[rate.department][rate.task_name] = rate.standard_rate
+      })
+      setStandardRates(ratesMap)
+    } catch (err) {
+      console.error('Error loading standard rates:', err)
+    }
+  }
+
+  const createJob = async (jobData) => {
+    try {
+      setLoading(true)
+      const newJob = await jobsAPI.createJob(jobData)
+      setCurrentJob({
+        ...currentJob,
+        id: newJob.id,
+        ...jobData
+      })
+      await loadJobs() // Refresh jobs list
+      return newJob
+    } catch (err) {
+      setError('Failed to create job: ' + err.message)
+      console.error('Error creating job:', err)
+      throw err
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const saveJob = async () => {
+    try {
+      setLoading(true)
+      if (currentJob.id) {
+        await jobsAPI.updateJob(currentJob.id, {
+          job_number: currentJob.jobNumber,
+          job_name: currentJob.jobName,
+          job_address: currentJob.jobAddress,
+          contact_name: currentJob.contactName,
+          contact_email: currentJob.contactEmail,
+          contact_phone: currentJob.contactPhone,
+          estimate_completed_by: currentJob.estimateCompletedBy,
+          project_manager: currentJob.projectManager,
+          estimate_date: currentJob.estimateDate
+        })
+        await loadJobs()
+      }
+    } catch (err) {
+      setError('Failed to save job: ' + err.message)
+      console.error('Error saving job:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const deleteJob = async (jobId) => {
+    try {
+      setLoading(true)
+      await jobsAPI.deleteJob(jobId)
+      await loadJobs()
+    } catch (err) {
+      setError('Failed to delete job: ' + err.message)
+      console.error('Error deleting job:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
 
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -267,12 +371,40 @@ function App() {
             {activeMenuItem === 'job-estimates' && (
               <div>
                 <h2 className="text-2xl font-bold text-slate-900 mb-6">Job Estimates</h2>
+                
+                {/* Error Display */}
+                {error && (
+                  <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+                    <p className="text-red-800">{error}</p>
+                    <button 
+                      onClick={() => setError(null)}
+                      className="text-red-600 hover:text-red-800 text-sm underline mt-1"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                )}
+                
                 <div className="bg-white rounded-lg shadow-sm border border-slate-200">
                   <div className="p-6">
                     <div className="flex justify-between items-center mb-4">
                       <h3 className="text-lg font-semibold text-slate-900">Recent Estimates</h3>
                       <Button
                         onClick={() => {
+                          // Reset current job state
+                          setCurrentJob({
+                            id: null,
+                            jobNumber: '',
+                            jobName: '',
+                            jobAddress: '',
+                            contactName: '',
+                            contactEmail: '',
+                            contactPhone: '',
+                            estimateCompletedBy: '',
+                            projectManager: '',
+                            estimateDate: new Date().toISOString().split('T')[0],
+                            signs: []
+                          })
                           setActiveMenuItem('job-creation')
                           setJobCreationStep('job-info')
                         }}
@@ -281,17 +413,75 @@ function App() {
                         New Estimate
                       </Button>
                     </div>
-                    <div className="space-y-4">
-                      <div className="border border-slate-200 rounded-lg p-4">
-                        <div className="flex justify-between items-start">
-                          <div>
-                            <h4 className="font-medium text-slate-900">Main Street Shopping Center</h4>
-                            <p className="text-sm text-slate-500">EST-2024-001 • Created: Dec 15, 2024</p>
-                          </div>
-                          <span className="px-2 py-1 bg-yellow-100 text-yellow-800 text-xs rounded-full">Pending</span>
-                        </div>
+                    
+                    {loading ? (
+                      <div className="text-center py-8">
+                        <p className="text-slate-500">Loading jobs...</p>
                       </div>
-                    </div>
+                    ) : jobs.length === 0 ? (
+                      <div className="text-center py-8">
+                        <p className="text-slate-500">No job estimates found. Create your first estimate to get started.</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        {jobs.map((job) => (
+                          <div key={job.id} className="border border-slate-200 rounded-lg p-4">
+                            <div className="flex justify-between items-start">
+                              <div>
+                                <h4 className="font-medium text-slate-900">{job.job_name}</h4>
+                                <p className="text-sm text-slate-500">
+                                  {job.job_number} • Created: {new Date(job.created_at).toLocaleDateString()}
+                                </p>
+                                <p className="text-sm text-slate-600 mt-1">
+                                  Contact: {job.contact_name} • PM: {job.project_manager}
+                                </p>
+                              </div>
+                              <div className="flex items-center space-x-2">
+                                <span className={`px-2 py-1 text-xs rounded-full ${
+                                  job.status === 'draft' ? 'bg-yellow-100 text-yellow-800' :
+                                  job.status === 'pending' ? 'bg-blue-100 text-blue-800' :
+                                  job.status === 'approved' ? 'bg-green-100 text-green-800' :
+                                  'bg-gray-100 text-gray-800'
+                                }`}>
+                                  {job.status.charAt(0).toUpperCase() + job.status.slice(1)}
+                                </span>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => {
+                                    setCurrentJob({
+                                      id: job.id,
+                                      jobNumber: job.job_number,
+                                      jobName: job.job_name,
+                                      jobAddress: job.job_address,
+                                      contactName: job.contact_name,
+                                      contactEmail: job.contact_email,
+                                      contactPhone: job.contact_phone,
+                                      estimateCompletedBy: job.estimate_completed_by,
+                                      projectManager: job.project_manager,
+                                      estimateDate: job.estimate_date,
+                                      signs: []
+                                    })
+                                    setActiveMenuItem('job-creation')
+                                    setJobCreationStep('job-estimate-summary')
+                                  }}
+                                >
+                                  View
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => deleteJob(job.id)}
+                                  className="text-red-600 hover:text-red-800"
+                                >
+                                  Delete
+                                </Button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -398,13 +588,33 @@ function App() {
                         />
                       </div>
                       <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-2">Contact</label>
+                        <label className="block text-sm font-medium text-slate-700 mb-2">Contact Name</label>
                         <input
                           type="text"
-                          value={currentJob.contact}
-                          onChange={(e) => setCurrentJob({...currentJob, contact: e.target.value})}
+                          value={currentJob.contactName}
+                          onChange={(e) => setCurrentJob({...currentJob, contactName: e.target.value})}
                           className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                           placeholder="Enter contact name"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-2">Contact Email</label>
+                        <input
+                          type="email"
+                          value={currentJob.contactEmail}
+                          onChange={(e) => setCurrentJob({...currentJob, contactEmail: e.target.value})}
+                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          placeholder="Enter contact email"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-2">Contact Phone</label>
+                        <input
+                          type="tel"
+                          value={currentJob.contactPhone}
+                          onChange={(e) => setCurrentJob({...currentJob, contactPhone: e.target.value})}
+                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          placeholder="Enter contact phone"
                         />
                       </div>
                       <div>
@@ -428,11 +638,11 @@ function App() {
                         />
                       </div>
                       <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-2">Date</label>
+                        <label className="block text-sm font-medium text-slate-700 mb-2">Estimate Date</label>
                         <input
                           type="date"
-                          value={currentJob.date}
-                          onChange={(e) => setCurrentJob({...currentJob, date: e.target.value})}
+                          value={currentJob.estimateDate}
+                          onChange={(e) => setCurrentJob({...currentJob, estimateDate: e.target.value})}
                           className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                         />
                       </div>
@@ -440,10 +650,31 @@ function App() {
                     
                     <div className="flex justify-end mt-6">
                       <Button
-                        onClick={() => setJobCreationStep('job-estimate-summary')}
-                        className="bg-blue-600 hover:bg-blue-700"
+                        onClick={async () => {
+                          try {
+                            if (!currentJob.estimateDate) {
+                              setCurrentJob({...currentJob, estimateDate: new Date().toISOString().split('T')[0]})
+                            }
+                            await createJob({
+                              jobNumber: currentJob.jobNumber,
+                              jobName: currentJob.jobName,
+                              jobAddress: currentJob.jobAddress,
+                              contactName: currentJob.contactName,
+                              contactEmail: currentJob.contactEmail,
+                              contactPhone: currentJob.contactPhone,
+                              estimateCompletedBy: currentJob.estimateCompletedBy,
+                              projectManager: currentJob.projectManager,
+                              estimateDate: currentJob.estimateDate || new Date().toISOString().split('T')[0]
+                            })
+                            setJobCreationStep('job-estimate-summary')
+                          } catch (err) {
+                            // Error is handled in createJob function
+                          }
+                        }}
+                        disabled={loading}
+                        className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
                       >
-                        Create Job Estimate
+                        {loading ? 'Creating...' : 'Create Job Estimate'}
                       </Button>
                     </div>
                   </div>
