@@ -1681,27 +1681,30 @@ function App() {
                                           const newMaterials = currentSign.materials.filter((_, i) => i !== index)
                                           setCurrentSign({ ...currentSign, materials: newMaterials })
                                         }}
-                                        className="px-2 py-1 bg-red-500 text-white text-xs rounded hover:bg-red-600"
+                                        className="text-red-600 hover:text-red-800 text-sm"
                                       >
                                         Remove
                                       </button>
                                     </td>
                                   </tr>
-                                ))}
-                                <tr>
-                                  <td colSpan="6" className="border border-slate-300 px-4 py-2 text-center">
-                                    <button
-                                      onClick={() => {
-                                        const newMaterials = [...currentSign.materials, { name: '', type: '', qty: 0, cost: 0 }]
-                                        setCurrentSign({ ...currentSign, materials: newMaterials })
-                                      }}
-                                      className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-                                    >
-                                      <Plus className="w-4 h-4 inline mr-1" />
-                                      Add Row
-                                    </button>
-                                  </td>
-                                </tr>
+                                          ))}
+                              </tbody>
+                            </table>
+                            <div className="mt-2">
+                              <button
+                                onClick={() => {
+                                  const newMaterials = [...currentSign.materials, { name: '', type: '', qty: 0, cost: 0 }]
+                                  setCurrentSign({ ...currentSign, materials: newMaterials })
+                                }}
+                                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm"
+                              >
+                                Add Row
+                              </button>
+                            </div>
+                          </div>
+                          <div className="mt-4">
+                            <table className="w-full border-collapse border border-slate-300">
+                              <tbody>
                                 <tr className="bg-slate-100">
                                   <td className="border border-slate-300 px-4 py-2 font-bold" colSpan="4">Material Cost</td>
                                   <td className="border border-slate-300 px-4 py-2 text-center font-bold">
