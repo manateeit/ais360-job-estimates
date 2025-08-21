@@ -20,7 +20,7 @@ import {
   Eye,
   ArrowRight
 } from 'lucide-react'
-import { jobsAPI, signsAPI, standardRatesAPI, supabase } from './lib/supabase.js'
+import { jobsAPI, signsAPI, standardRatesAPI, estimateRequestsAPI, supabase } from './lib/supabase.js'
 import { netsuiteClient } from './lib/netsuiteClient.js'
 import './App.css'
 
@@ -42,6 +42,8 @@ function App() {
   const [netsuiteLoading, setNetsuiteLoading] = useState(false)
   const [netsuiteError, setNetsuiteError] = useState(null)
   const [selectedRequest, setSelectedRequest] = useState(null)
+  const [syncLoading, setSyncLoading] = useState(false)
+  const [syncStatus, setSyncStatus] = useState(null)
   
   // Job creation states
   const [jobCreationStep, setJobCreationStep] = useState(null) // null, 'job-info', 'job-estimate-summary', 'sign-entry'
@@ -121,6 +123,7 @@ function App() {
   useEffect(() => {
     loadJobs()
     loadStandardRates()
+    loadEstimateRequests() // Load estimate requests from Supabase on page load
   }, [])
 
   // Database functions
@@ -158,8 +161,8 @@ function App() {
     try {
       setNetsuiteLoading(true)
       setNetsuiteError(null)
-      const response = await netsuiteClient.fetchPendingEstimateRequests()
-      setEstimateRequests(response.items)
+      const data = await estimateRequestsAPI.getAllEstimateRequests()
+      setEstimateRequests(data)
     } catch (err) {
       setNetsuiteError('Failed to load estimate requests: ' + err.message)
       console.error('Error loading estimate requests:', err)
@@ -168,47 +171,91 @@ function App() {
     }
   }
 
-  const convertRequestToJobEstimate = async (requestId) => {
+  const syncEstimateRequests = async () => {
     try {
-      setNetsuiteLoading(true)
-      const result = await netsuiteClient.convertRequestToJobEstimate(requestId)
+      setSyncLoading(true)
+      setSyncStatus(null)
+      const result = await estimateRequestsAPI.syncFromNetSuite()
       
       if (result.success) {
-        // Find the request to convert
-        const request = estimateRequests.find(req => req.id === requestId)
-        if (request) {
-          // Create a new job estimate with the request data
-          const jobData = {
-            jobNumber: result.jobEstimateId,
-            jobName: request.job_name,
-            jobAddress: '', // Not available in estimate request
-            contactName: request.requested_by_name,
-            contactEmail: '', // Not available in estimate request
-            contactPhone: '', // Not available in estimate request
-            estimateCompletedBy: request.assigned_to_name,
-            projectManager: request.assigned_to_name,
-            estimateDate: new Date().toISOString().split('T')[0]
-          }
-          
-          // Create the job estimate
-          await createJob(jobData)
-          
-          // Refresh estimate requests to remove the converted one
-          await loadEstimateRequests()
-          
-          // Switch to job estimates view
-          setActiveMenuItem('job-estimates')
-          
-          return { success: true, message: 'Successfully converted to job estimate!' }
-        }
+        setSyncStatus(`Successfully synced ${result.synced_count} records from NetSuite`)
+        // Reload the data to show updated records
+        await loadEstimateRequests()
+      } else {
+        setNetsuiteError('Sync failed: ' + result.error)
+      }
+    } catch (err) {
+      setNetsuiteError('Sync failed: ' + err.message)
+      console.error('Error syncing estimate requests:', err)
+    } finally {
+      setSyncLoading(false)
+    }
+  }
+
+  const deleteSign = async (signId) => {
+    if (!confirm('Are you sure you want to delete this sign estimate?')) {
+      return
+    }
+    
+    try {
+      await signsAPI.deleteSign(signId)
+      
+      // Reload signs for current job
+      if (currentJob && currentJob.id) {
+        await loadSignsForJob(currentJob.id)
       }
       
-      return result
+      setError(null)
     } catch (err) {
-      console.error('Error converting request:', err)
-      return { success: false, error: err.message }
-    } finally {
-      setNetsuiteLoading(false)
+      setError('Failed to delete sign: ' + err.message)
+      console.error('Error deleting sign:', err)
+    }
+  }
+
+  const handleCreateOrEditEstimate = async (request) => {
+    try {
+      if (request.converted_to_job_id) {
+        // Edit existing job estimate - navigate to job estimate view
+        const existingJob = jobs.find(job => job.id === request.converted_to_job_id)
+        if (existingJob) {
+          setCurrentJob(existingJob)
+          setJobCreationStep('job-estimate-summary')
+          setActiveMenuItem('job-estimates')
+        } else {
+          setError('Associated job estimate not found')
+        }
+      } else {
+        // Create new job estimate from request
+        const jobData = {
+          jobNumber: `EST-${request.netsuite_job_id}`,
+          jobName: request.job_name || 'Estimate Request Job',
+          jobAddress: '',
+          contactName: request.requested_by || '',
+          contactEmail: '',
+          contactPhone: '',
+          estimateCompletedBy: request.assigned_to || '',
+          projectManager: request.assigned_to || '',
+          estimateDate: new Date().toISOString().split('T')[0],
+          estimate_request_id: request.id
+        }
+        
+        // Create the job estimate
+        const newJob = await createJob(jobData)
+        
+        // Mark the estimate request as converted
+        await estimateRequestsAPI.markAsConverted(request.id, newJob.id)
+        
+        // Refresh estimate requests to show updated status
+        await loadEstimateRequests()
+        
+        // Navigate to the new job estimate
+        setCurrentJob(newJob)
+        setJobCreationStep('job-estimate-summary')
+        setActiveMenuItem('job-estimates')
+      }
+    } catch (err) {
+      setError('Failed to create/edit estimate: ' + err.message)
+      console.error('Error handling estimate:', err)
     }
   }
 
@@ -600,24 +647,56 @@ function App() {
               <div>
                 <div className="flex items-center justify-between mb-6">
                   <h2 className="text-2xl font-bold text-slate-900">Job Estimate Requests</h2>
-                  <Button
-                    onClick={loadEstimateRequests}
-                    disabled={netsuiteLoading}
-                    className="bg-blue-600 hover:bg-blue-700 text-white"
-                  >
-                    {netsuiteLoading ? (
-                      <>
-                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                        Loading...
-                      </>
-                    ) : (
-                      <>
-                        <RefreshCw className="h-4 w-4 mr-2" />
-                        Refresh
-                      </>
-                    )}
-                  </Button>
+                  <div className="flex gap-3">
+                    <Button
+                      onClick={loadEstimateRequests}
+                      disabled={netsuiteLoading}
+                      className="bg-slate-600 hover:bg-slate-700 text-white"
+                    >
+                      {netsuiteLoading ? (
+                        <>
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                          Loading...
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="h-4 w-4 mr-2" />
+                          Refresh
+                        </>
+                      )}
+                    </Button>
+                    <Button
+                      onClick={syncEstimateRequests}
+                      disabled={syncLoading}
+                      className="bg-blue-600 hover:bg-blue-700 text-white"
+                    >
+                      {syncLoading ? (
+                        <>
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                          Syncing...
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="h-4 w-4 mr-2" />
+                          Sync from NetSuite
+                        </>
+                      )}
+                    </Button>
+                  </div>
                 </div>
+
+                {/* Success Status Display */}
+                {syncStatus && (
+                  <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg">
+                    <p className="text-green-800">{syncStatus}</p>
+                    <button 
+                      onClick={() => setSyncStatus(null)}
+                      className="text-green-600 hover:text-green-800 text-sm underline mt-1"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                )}
 
                 {/* Error Display */}
                 {netsuiteError && (
@@ -661,22 +740,22 @@ function App() {
                           <thead className="bg-slate-50">
                             <tr>
                               <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-                                Request ID
+                                Estimate ID
+                              </th>
+                              <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                Job ID
                               </th>
                               <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
                                 Job Name
                               </th>
                               <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-                                Priority
-                              </th>
-                              <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-                                Status
-                              </th>
-                              <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
                                 Assigned To
                               </th>
                               <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
-                                Due Date
+                                Estimate Due Date
+                              </th>
+                              <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                Completion Date
                               </th>
                               <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
                                 Actions
@@ -687,43 +766,30 @@ function App() {
                             {estimateRequests.map((request) => (
                               <tr key={request.id} className="hover:bg-slate-50">
                                 <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-900">
-                                  {request.id}
+                                  {request.netsuite_id || request.id}
                                 </td>
                                 <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-900">
-                                  {request.job_name}
-                                </td>
-                                <td className="px-6 py-4 whitespace-nowrap">
-                                  <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${netsuiteClient.getPriorityColor(request.priority_name)}`}>
-                                    {request.priority_name}
-                                  </span>
-                                </td>
-                                <td className="px-6 py-4 whitespace-nowrap">
-                                  <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${netsuiteClient.getStatusColor(request.status_name)}`}>
-                                    {request.status_name}
-                                  </span>
+                                  {request.netsuite_job_id || '-'}
                                 </td>
                                 <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-900">
-                                  {request.assigned_to_name}
+                                  {request.job_name || '-'}
                                 </td>
                                 <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-900">
-                                  {netsuiteClient.formatDate(request.bid_due_date)}
+                                  {request.assigned_to || 'Unassigned'}
                                 </td>
-                                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
-                                  <Button
-                                    onClick={() => setSelectedRequest(request)}
-                                    className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-3 py-1"
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-900">
+                                  {request.estimate_due_date ? new Date(request.estimate_due_date).toLocaleDateString() : '-'}
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-900">
+                                  {request.estimate_completed ? new Date(request.estimate_completed).toLocaleDateString() : 'Not Completed'}
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                                  <button
+                                    onClick={() => handleCreateOrEditEstimate(request)}
+                                    className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
                                   >
-                                    <Eye className="h-3 w-3 mr-1" />
-                                    View
-                                  </Button>
-                                  <Button
-                                    onClick={() => convertRequestToJobEstimate(request.id)}
-                                    disabled={netsuiteLoading}
-                                    className="bg-green-600 hover:bg-green-700 text-white text-xs px-3 py-1"
-                                  >
-                                    <ArrowRight className="h-3 w-3 mr-1" />
-                                    Convert
-                                  </Button>
+                                    {request.converted_to_job_id ? 'Edit' : 'Create'}
+                                  </button>
                                 </td>
                               </tr>
                             ))}
@@ -733,122 +799,17 @@ function App() {
                     )}
                   </div>
                 </div>
-
-                {/* Request Detail Modal */}
-                {selectedRequest && (
-                  <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-                    <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-                      <div className="p-6">
-                        <div className="flex items-center justify-between mb-4">
-                          <h3 className="text-lg font-semibold text-slate-900">
-                            Request Details - {selectedRequest.id}
-                          </h3>
-                          <button
-                            onClick={() => setSelectedRequest(null)}
-                            className="text-slate-400 hover:text-slate-600"
-                          >
-                            <X className="h-5 w-5" />
-                          </button>
-                        </div>
-                        
-                        <div className="space-y-4">
-                          <div className="grid grid-cols-2 gap-4">
-                            <div>
-                              <label className="text-sm font-medium text-slate-700">Job Name</label>
-                              <p className="text-slate-900">{selectedRequest.job_name}</p>
-                            </div>
-                            <div>
-                              <label className="text-sm font-medium text-slate-700">Priority</label>
-                              <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${netsuiteClient.getPriorityColor(selectedRequest.priority_name)}`}>
-                                {selectedRequest.priority_name}
-                              </span>
-                            </div>
-                            <div>
-                              <label className="text-sm font-medium text-slate-700">Status</label>
-                              <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${netsuiteClient.getStatusColor(selectedRequest.status_name)}`}>
-                                {selectedRequest.status_name}
-                              </span>
-                            </div>
-                            <div>
-                              <label className="text-sm font-medium text-slate-700">Assigned To</label>
-                              <p className="text-slate-900">{selectedRequest.assigned_to_name}</p>
-                            </div>
-                            <div>
-                              <label className="text-sm font-medium text-slate-700">Requested By</label>
-                              <p className="text-slate-900">{selectedRequest.requested_by_name}</p>
-                            </div>
-                            <div>
-                              <label className="text-sm font-medium text-slate-700">Due Date</label>
-                              <p className="text-slate-900">{netsuiteClient.formatDate(selectedRequest.bid_due_date)}</p>
-                            </div>
-                            <div>
-                              <label className="text-sm font-medium text-slate-700">Date Submitted</label>
-                              <p className="text-slate-900">{netsuiteClient.formatDate(selectedRequest.date_submitted)}</p>
-                            </div>
-                            <div>
-                              <label className="text-sm font-medium text-slate-700">Estimate Due</label>
-                              <p className="text-slate-900">{netsuiteClient.formatDate(selectedRequest.estimate_due_date)}</p>
-                            </div>
-                          </div>
-                          
-                          {selectedRequest.estimator_note && (
-                            <div>
-                              <label className="text-sm font-medium text-slate-700">Estimator Notes</label>
-                              <p className="text-slate-900 bg-slate-50 p-3 rounded-lg mt-1">
-                                {selectedRequest.estimator_note}
-                              </p>
-                            </div>
-                          )}
-                        </div>
-                        
-                        <div className="flex justify-end space-x-3 mt-6 pt-4 border-t border-slate-200">
-                          <Button
-                            onClick={() => setSelectedRequest(null)}
-                            className="bg-slate-100 hover:bg-slate-200 text-slate-700"
-                          >
-                            Close
-                          </Button>
-                          <Button
-                            onClick={() => {
-                              convertRequestToJobEstimate(selectedRequest.id)
-                              setSelectedRequest(null)
-                            }}
-                            disabled={netsuiteLoading}
-                            className="bg-green-600 hover:bg-green-700 text-white"
-                          >
-                            <ArrowRight className="h-4 w-4 mr-2" />
-                            Convert to Job Estimate
-                          </Button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
               </div>
             )}
 
             {/* Job Estimates */}
             {activeMenuItem === 'job-estimates' && (
               <div>
-                <h2 className="text-2xl font-bold text-slate-900 mb-6">Job Estimates</h2>
-                
-                {/* Error Display */}
-                {error && (
-                  <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg">
-                    <p className="text-red-800">{error}</p>
-                    <button 
-                      onClick={() => setError(null)}
-                      className="text-red-600 hover:text-red-800 text-sm underline mt-1"
-                    >
-                      Dismiss
-                    </button>
-                  </div>
-                )}
-                
-                <div className="bg-white rounded-lg shadow-sm border border-slate-200">
-                  <div className="p-6">
-                    <div className="flex justify-between items-center mb-4">
-                      <h3 className="text-lg font-semibold text-slate-900">Recent Estimates</h3>
+                {/* Job Estimates List View */}
+                {jobCreationStep === null && (
+                  <div>
+                    <div className="flex justify-between items-center mb-6">
+                      <h2 className="text-2xl font-bold text-slate-900">Job Estimates</h2>
                       <Button
                         onClick={() => {
                           // Reset current job state
@@ -865,7 +826,6 @@ function App() {
                             estimateDate: new Date().toISOString().split('T')[0],
                             signs: []
                           })
-                          setActiveMenuItem('job-creation')
                           setJobCreationStep('job-info')
                         }}
                         className="bg-blue-600 hover:bg-blue-700"
@@ -874,77 +834,224 @@ function App() {
                       </Button>
                     </div>
                     
-                    {loading ? (
-                      <div className="text-center py-8">
-                        <p className="text-slate-500">Loading jobs...</p>
-                      </div>
-                    ) : jobs.length === 0 ? (
-                      <div className="text-center py-8">
-                        <p className="text-slate-500">No job estimates found. Create your first estimate to get started.</p>
-                      </div>
-                    ) : (
-                      <div className="space-y-4">
-                        {jobs.map((job) => (
-                          <div key={job.id} className="border border-slate-200 rounded-lg p-4">
-                            <div className="flex justify-between items-start">
-                              <div>
-                                <h4 className="font-medium text-slate-900">{job.job_name}</h4>
-                                <p className="text-sm text-slate-500">
-                                  {job.job_number} • Created: {new Date(job.created_at).toLocaleDateString()}
-                                </p>
-                                <p className="text-sm text-slate-600 mt-1">
-                                  Contact: {job.contact_name} • PM: {job.project_manager}
-                                </p>
-                              </div>
-                              <div className="flex items-center space-x-2">
-                                <span className={`px-2 py-1 text-xs rounded-full ${
-                                  job.status === 'draft' ? 'bg-yellow-100 text-yellow-800' :
-                                  job.status === 'pending' ? 'bg-blue-100 text-blue-800' :
-                                  job.status === 'approved' ? 'bg-green-100 text-green-800' :
-                                  'bg-gray-100 text-gray-800'
-                                }`}>
-                                  {job.status.charAt(0).toUpperCase() + job.status.slice(1)}
-                                </span>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={async () => {
-                                    setCurrentJob({
-                                      id: job.id,
-                                      jobNumber: job.job_number,
-                                      jobName: job.job_name,
-                                      jobAddress: job.job_address,
-                                      contactName: job.contact_name,
-                                      contactEmail: job.contact_email,
-                                      contactPhone: job.contact_phone,
-                                      estimateCompletedBy: job.estimate_completed_by,
-                                      projectManager: job.project_manager,
-                                      estimateDate: job.estimate_date,
-                                      signs: []
-                                    })
-                                    await loadSignsForJob(job.id)
-                                    setActiveMenuItem('job-creation')
-                                    setJobCreationStep('job-estimate-summary')
-                                  }}
-                                >
-                                  View
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => deleteJob(job.id)}
-                                  className="text-red-600 hover:text-red-800"
-                                >
-                                  Delete
-                                </Button>
-                              </div>
-                            </div>
-                          </div>
-                        ))}
+                    {/* Error Display */}
+                    {error && (
+                      <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+                        <p className="text-red-800">{error}</p>
+                        <button 
+                          onClick={() => setError(null)}
+                          className="text-red-600 hover:text-red-800 text-sm underline mt-1"
+                        >
+                          Dismiss
+                        </button>
                       </div>
                     )}
+                    
+                    <div className="bg-white rounded-lg shadow-sm border border-slate-200">
+                      <div className="p-6">
+                        {loading ? (
+                          <div className="text-center py-8">
+                            <p className="text-slate-500">Loading jobs...</p>
+                          </div>
+                        ) : jobs.length === 0 ? (
+                          <div className="text-center py-8">
+                            <p className="text-slate-500">No job estimates found. Create your first estimate to get started.</p>
+                          </div>
+                        ) : (
+                          <div className="overflow-x-auto">
+                            <table className="min-w-full divide-y divide-slate-200">
+                              <thead className="bg-slate-50">
+                                <tr>
+                                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                    Job Number
+                                  </th>
+                                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                    Job Name
+                                  </th>
+                                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                    Contact
+                                  </th>
+                                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                    Status
+                                  </th>
+                                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                    Signs
+                                  </th>
+                                  <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                                    Actions
+                                  </th>
+                                </tr>
+                              </thead>
+                              <tbody className="bg-white divide-y divide-slate-200">
+                                {jobs.map((job) => (
+                                  <tr key={job.id} className="hover:bg-slate-50">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-900">
+                                      {job.job_number}
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-900">
+                                      {job.job_name}
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-900">
+                                      {job.contact_name}
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap">
+                                      <span className={`px-2 py-1 text-xs rounded-full ${
+                                        job.status === 'draft' ? 'bg-yellow-100 text-yellow-800' :
+                                        job.status === 'pending' ? 'bg-blue-100 text-blue-800' :
+                                        job.status === 'approved' ? 'bg-green-100 text-green-800' :
+                                        'bg-gray-100 text-gray-800'
+                                      }`}>
+                                        {job.status.charAt(0).toUpperCase() + job.status.slice(1)}
+                                      </span>
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-900">
+                                      {job.sign_count || 0} signs
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                                      <button
+                                        onClick={async () => {
+                                          setCurrentJob({
+                                            id: job.id,
+                                            jobNumber: job.job_number,
+                                            jobName: job.job_name,
+                                            jobAddress: job.job_address,
+                                            contactName: job.contact_name,
+                                            contactEmail: job.contact_email,
+                                            contactPhone: job.contact_phone,
+                                            estimateCompletedBy: job.estimate_completed_by,
+                                            projectManager: job.project_manager,
+                                            estimateDate: job.estimate_date,
+                                            signs: []
+                                          })
+                                          await loadSignsForJob(job.id)
+                                          setJobCreationStep('job-estimate-summary')
+                                        }}
+                                        className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm"
+                                      >
+                                        Manage
+                                      </button>
+                                      <button
+                                        onClick={() => deleteJob(job.id)}
+                                        className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm"
+                                      >
+                                        Delete
+                                      </button>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                </div>
+                )}
+
+                {/* Job Estimate Management View */}
+                {jobCreationStep === 'job-estimate-summary' && currentJob && (
+                  <div>
+                    <div className="flex items-center justify-between mb-6">
+                      <div className="flex items-center space-x-4">
+                        <button
+                          onClick={() => {
+                            setJobCreationStep(null)
+                            setCurrentJob(null)
+                          }}
+                          className="text-slate-600 hover:text-slate-800"
+                        >
+                          ← Back to Job Estimates
+                        </button>
+                        <h2 className="text-2xl font-bold text-slate-900">
+                          {currentJob.jobName} ({currentJob.jobNumber})
+                        </h2>
+                      </div>
+                      <Button
+                        onClick={() => setJobCreationStep('sign-entry')}
+                        className="bg-green-600 hover:bg-green-700"
+                      >
+                        Add Sign Estimate
+                      </Button>
+                    </div>
+
+                    {/* Job Info Summary */}
+                    <div className="bg-white rounded-lg shadow-sm border border-slate-200 mb-6">
+                      <div className="p-6">
+                        <h3 className="text-lg font-semibold text-slate-900 mb-4">Job Information</h3>
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                          <div>
+                            <label className="text-sm font-medium text-slate-700">Contact</label>
+                            <p className="text-slate-900">{currentJob.contactName}</p>
+                          </div>
+                          <div>
+                            <label className="text-sm font-medium text-slate-700">Project Manager</label>
+                            <p className="text-slate-900">{currentJob.projectManager}</p>
+                          </div>
+                          <div>
+                            <label className="text-sm font-medium text-slate-700">Estimate Date</label>
+                            <p className="text-slate-900">{new Date(currentJob.estimateDate).toLocaleDateString()}</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Sign Estimates */}
+                    <div className="bg-white rounded-lg shadow-sm border border-slate-200">
+                      <div className="p-6">
+                        <h3 className="text-lg font-semibold text-slate-900 mb-4">Sign Estimates</h3>
+                        
+                        {currentJob.signs && currentJob.signs.length > 0 ? (
+                          <div className="space-y-4">
+                            {currentJob.signs.map((sign) => (
+                              <div key={sign.id} className="border border-slate-200 rounded-lg p-4">
+                                <div className="flex justify-between items-start">
+                                  <div>
+                                    <h4 className="font-medium text-slate-900">
+                                      Sign #{sign.sign_number}
+                                    </h4>
+                                    <p className="text-sm text-slate-600 mt-1">
+                                      Total: ${sign.total_cost?.toFixed(2) || '0.00'}
+                                    </p>
+                                    <p className="text-sm text-slate-500">
+                                      Created: {new Date(sign.created_at).toLocaleDateString()}
+                                    </p>
+                                  </div>
+                                  <div className="flex space-x-2">
+                                    <button
+                                      onClick={() => {
+                                        setCurrentSign(sign)
+                                        setJobCreationStep('sign-entry')
+                                      }}
+                                      className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      onClick={() => deleteSign(sign.id)}
+                                      className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm"
+                                    >
+                                      Delete
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-center py-8">
+                            <p className="text-slate-500 mb-4">No sign estimates yet.</p>
+                            <Button
+                              onClick={() => setJobCreationStep('sign-entry')}
+                              className="bg-green-600 hover:bg-green-700"
+                            >
+                              Add First Sign Estimate
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1273,10 +1380,24 @@ function App() {
                 {jobCreationStep === 'sign-entry' && (
                   <div className="bg-white rounded-lg shadow-sm border border-slate-200">
                     <div className="p-6">
-                      <div className="mb-6">
-                        <h3 className="text-lg font-semibold text-slate-900">
-                          {editingSignIndex !== null ? 'Edit Sign Estimate' : 'Add Sign Estimate'}
-                        </h3>
+                      <div className="flex items-center justify-between mb-6">
+                        <div className="flex items-center space-x-4">
+                          <button
+                            onClick={() => {
+                              setJobCreationStep('job-estimate-summary')
+                              setCurrentSign(null)
+                            }}
+                            className="text-slate-600 hover:text-slate-800"
+                          >
+                            ← Back to Job Estimate
+                          </button>
+                          <h3 className="text-lg font-semibold text-slate-900">
+                            {currentSign && currentSign.id ? 'Edit Sign Estimate' : 'Add Sign Estimate'}
+                          </h3>
+                        </div>
+                        <div className="text-sm text-slate-600">
+                          Job: {currentJob?.jobName} ({currentJob?.jobNumber})
+                        </div>
                       </div>
 
                       {/* Sign Details */}

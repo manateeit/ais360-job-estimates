@@ -2,8 +2,8 @@
 
 class NetSuiteClient {
   constructor() {
-    // Use the exposed server API endpoint
-    this.baseUrl = 'https://3001-ix3eo15nho73k6foqvuf8-07a53a4d.manusvm.computer/api/netsuite'
+    // Use the local Flask backend for development testing
+    this.baseUrl = 'https://5000-ixwnutv5bg7ibnsrzaori-5f49a4c4.manusvm.computer/api/netsuite'
   }
 
   async fetchPendingEstimateRequests() {

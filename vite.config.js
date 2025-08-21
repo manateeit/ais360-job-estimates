@@ -13,6 +13,6 @@ export default defineConfig({
   },
   server: {
     host: true,
-    allowedHosts: ['all', '5173-i3ta90nglgvnxlyvkbmbx-07a53a4d.manusvm.computer', '5173-ix3eo15nho73k6foqvuf8-07a53a4d.manusvm.computer']
+    allowedHosts: ['all', '5173-ixwnutv5bg7ibnsrzaori-5f49a4c4.manusvm.computer']
   }
 })

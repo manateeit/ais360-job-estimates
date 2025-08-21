@@ -21,7 +21,8 @@ export const jobsAPI = {
         estimate_completed_by: jobData.estimateCompletedBy,
         project_manager: jobData.projectManager,
         estimate_date: jobData.estimateDate || new Date().toISOString().split('T')[0],
-        status: 'draft'
+        status: 'draft',
+        estimate_request_id: jobData.estimate_request_id || null
       }])
       .select()
       .single()
@@ -346,6 +347,125 @@ export const standardRatesAPI = {
       .from('jobestimate_standard_rates')
       .select('*')
       .order('department', { ascending: true })
+    
+    if (error) throw error
+    return data
+  }
+}
+
+
+
+// Database operations for estimate requests
+export const estimateRequestsAPI = {
+  // Get all estimate requests from Supabase
+  async getAllEstimateRequests() {
+    const { data, error } = await supabase
+      .from('estimate_requests')
+      .select('*')
+      .order('created_at', { ascending: false })
+    
+    if (error) throw error
+    return data
+  },
+
+  // Sync estimate requests from NetSuite and save to Supabase
+  async syncFromNetSuite() {
+    try {
+      // First, fetch data from NetSuite via our backend API
+      const response = await fetch('https://5000-ixwnutv5bg7ibnsrzaori-5f49a4c4.manusvm.computer/api/netsuite/estimate-requests')
+      if (!response.ok) {
+        throw new Error(`NetSuite API error: ${response.status}`)
+      }
+      
+      const netsuiteData = await response.json()
+      
+      // If NetSuite sync fails, throw error (don't use mock data)
+      if (!netsuiteData.success) {
+        throw new Error(netsuiteData.error || 'NetSuite sync failed')
+      }
+      
+      // If no data received, throw error
+      if (!netsuiteData.data || netsuiteData.data.length === 0) {
+        throw new Error('No data received from NetSuite API')
+      }
+
+      // Transform and upsert the data to Supabase with correct field mappings
+      const transformedData = netsuiteData.data.map(record => ({
+        netsuite_id: record.id?.toString(),
+        netsuite_job_id: record.job_id,  // Map job_id to netsuite_job_id
+        job_name: record.job_name,
+        assigned_to: record.assigned_to,
+        assigned_to_id: record.assigned_to_id,
+        requested_by: record.requested_by,
+        requested_by_id: record.requested_by_id,
+        bid_due_date: record.bid_due_date,
+        priority_id: record.priority_id,
+        status_id: record.status_id,
+        estimate_due_date: record.estimate_due_date,
+        estimate_completed: record.estimate_completed,
+        date_submitted: record.date_submitted,
+        estimator_note: record.estimator_note,
+        job_description: record.job_description,
+        performance_bond: record.performance_bond,
+        performance_bond_amount: record.performance_bond_amount,
+        liquidated_damages: record.liquidated_damages,
+        liquidated_damages_amount: record.liquidated_damages_amount,
+        union_labor: record.union_labor,
+        prevailing_wage: record.prevailing_wage,
+        mbe_wbe: record.mbe_wbe,
+        rfi_due_date: record.rfi_due_date,
+        box_folder_link: record.box_folder_link,
+        completed_estimate_link: record.completed_estimate_link,
+        completed_estimate_amount: record.completed_estimate_amount,
+        job_status: record.job_status,
+        updated_at: new Date().toISOString()
+      }))
+
+      // Use upsert to insert new records or update existing ones based on netsuite_id
+      const { data, error } = await supabase
+        .from('estimate_requests')
+        .upsert(transformedData, { 
+          onConflict: 'netsuite_id',
+          ignoreDuplicates: false 
+        })
+        .select()
+
+      if (error) throw error
+
+      return {
+        success: true,
+        synced_count: data.length,
+        data: data
+      }
+
+    } catch (error) {
+      console.error('Sync error:', error)
+      throw error  // Re-throw to let the UI handle the error display
+    }
+  },
+
+  // Delete an estimate request
+  async deleteEstimateRequest(id) {
+    const { error } = await supabase
+      .from('estimate_requests')
+      .delete()
+      .eq('id', id)
+    
+    if (error) throw error
+    return true
+  },
+
+  // Mark estimate request as converted
+  async markAsConverted(id, jobEstimateId) {
+    const { data, error } = await supabase
+      .from('estimate_requests')
+      .update({ 
+        converted_to_job_id: jobEstimateId,
+        converted_at: new Date().toISOString()
+      })
+      .eq('id', id)
+      .select()
+      .single()
     
     if (error) throw error
     return data
